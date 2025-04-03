@@ -30,8 +30,8 @@ Model Persistence: Saves trained models using joblib for future predictions.
 
 Pre-Trained Model Support: Users can load and apply pre-trained models for sentiment analysis.
 
-**Installation
-**
+**Installation**
+
 To run this application, ensure you have Python installed and set up a virtual environment.
 
 # Clone the repository

@@ -122,9 +122,9 @@ def load_file(uploaded_file):
         return None
 
 @st.cache_resource
-def train_sentiment_model(df_train, text_column, sentiment_column, mapping_func=None):
+def train_sentiment_model(df_train, text_column, sentiment_column, _mapping_func=None):
     """Train a sentiment model with a default dataset if no labels are provided."""
-    if sentiment_column is None or mapping_func is None:
+    if sentiment_column is None or _mapping_func is None:
         st.write("No labeled data provided. Training on default Sentiment140 dataset (sample).")
         try:
             default_data = pd.read_csv('https://raw.githubusercontent.com/laxmimerit/twitter-data/master/twitt30k.csv', encoding='latin-1')
@@ -132,19 +132,24 @@ def train_sentiment_model(df_train, text_column, sentiment_column, mapping_func=
             default_data['sentiment'] = default_data['sentiment'].map({0: 'negative', 4: 'positive'}).fillna('neutral')
             df_train = default_data.sample(1000, random_state=42)
             text_column, sentiment_column = 'text', 'sentiment'
-            mapping_func = lambda x: x
+            _mapping_func = lambda x: x
         except:
             st.error("Failed to load default dataset. Please provide labeled data.")
             return None, None, 0, 0, 0, 0
 
     df_train = df_train.dropna(subset=[text_column])  # Remove nulls in text column
     df_train['cleaned_text'] = df_train[text_column].apply(lambda x: clean_text(x, remove_stopwords=True, lemmatize=True))
-    df_train['sentiment_mapped'] = df_train[sentiment_column].apply(mapping_func)
+    df_train['sentiment_mapped'] = df_train[sentiment_column].apply(_mapping_func)
+
+    # Check data balance
+    st.write("Sentiment Distribution in Training Data:")
+    st.write(df_train['sentiment_mapped'].value_counts())
+
     vectorizer = TfidfVectorizer(max_features=5000)
     X = vectorizer.fit_transform(df_train['cleaned_text'])
     y = df_train['sentiment_mapped']
 
-    model = LogisticRegression(max_iter=1000)
+    model = LogisticRegression(max_iter=1000, class_weight='balanced')  # Use class weights
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     model.fit(X_train, y_train)
 
@@ -165,7 +170,7 @@ def load_model_and_vectorizer():
         return None, None
     return model, vectorizer
 
-def predict_sentiment(texts, model, vectorizer, threshold=0.6):
+def predict_sentiment(texts, model, vectorizer, threshold=0.5):  # Lower the threshold
     """Predict sentiment with a neutral zone."""
     cleaned_texts = [clean_text(text, remove_stopwords=True, lemmatize=True) for text in texts]
     X = vectorizer.transform(cleaned_texts)
@@ -320,7 +325,7 @@ def main():
             else:
                 df_train = df  # Use default dataset if no labels
 
-            model, vectorizer, accuracy, precision, recall, f1 = train_sentiment_model(df_train, text_column, sentiment_column, mapping_func)
+            model, vectorizer, accuracy, precision, recall, f1 = train_sentiment_model(df_train, text_column, sentiment_column, _mapping_func=mapping_func)
             if model is None:
                 return
             st.success(f"Model trained successfully!")
@@ -375,7 +380,7 @@ def main():
             prob_dict = dict(zip(model.classes_, prob[0]))
             st.write(f"**Predicted Sentiment:** {sentiment.capitalize()}")
             st.write(f"**Probabilities:** {prob_dict}")
-            if max(prob[0]) < 0.6:
+            if max(prob[0]) < 0.5:
                 st.warning("Prediction confidence is low. Results may be uncertain.")
 
         # Download Results
@@ -397,7 +402,7 @@ def main():
         - **Data Handling**: Upload datasets (CSV, Excel, TXT, JSON) with text and optional sentiment (e.g., stock news, tweets).
         - **Cleaning**: Text is normalized, tokenized, stopwords removed, and lemmatized.
         - **Model**: Logistic Regression with TF-IDF features, trained locally. Uses Sentiment140 if no labels provided.
-        - **Prediction**: Analyzes new text with a 0.6 confidence threshold for clear sentiment.
+        - **Prediction**: Analyzes new text with a 0.5 confidence threshold for clear sentiment.
         - **Results**: View counts, distributions, metrics (accuracy, precision, recall, F1), and word clouds.
         """)
 

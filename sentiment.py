@@ -6,18 +6,16 @@ import string
 import matplotlib.pyplot as plt
 import seaborn as sns
 from wordcloud import WordCloud
-from collections import Counter
 import nltk
 from nltk.corpus import stopwords
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report, confusion_matrix, roc_curve, auc
-from langdetect import detect
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report, confusion_matrix
 import io
 import joblib
 import logging
-from datetime import datetime
+import json
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, filename='app.log', filemode='a',
@@ -27,11 +25,11 @@ logging.basicConfig(level=logging.INFO, filename='app.log', filemode='a',
 nltk.download('stopwords', quiet=True)
 stop_words = set(stopwords.words('english'))
 
-# Define a consistent color palette
-SENTIMENT_COLORS = {'positive': '#66c2a5', 'negative': '#fc8d62', 'neutral': '#8da0cb'}
+# Define a flexible color palette
+SENTIMENT_COLORS = {'positive': '#66c2a5', 'negative': '#fc8d62', 'neutral': '#8da0cb', 'good': '#66c2a5', 'bad': '#fc8d62'}
 
 # Function to clean and process text
-def clean_text(text, remove_stopwords=True, exclude_words=None):
+def clean_text(text, remove_stopwords=True):
     if not isinstance(text, str):
         return ""
     text = text.lower()
@@ -40,77 +38,105 @@ def clean_text(text, remove_stopwords=True, exclude_words=None):
     text = re.sub(r'\s+', ' ', text).strip()
     if remove_stopwords:
         text = ' '.join(word for word in text.split() if word not in stop_words)
-    if exclude_words:
-        text = ' '.join(word for word in text.split() if word not in exclude_words)
     return text
 
-# Function to detect language
-def detect_language(text):
+# Function to detect and map sentiment values dynamically
+def detect_and_map_sentiment(df, sentiment_column):
+    values = df[sentiment_column].dropna().astype(str).str.lower()
+    unique_values = set(values)
+    
     try:
-        return detect(text)
+        numeric_values = pd.to_numeric(values, errors='coerce')
+        if numeric_values.notna().all():
+            min_val, max_val = numeric_values.min(), numeric_values.max()
+            if min_val >= 1 and max_val <= 5:
+                st.write(f"Detected 1-5 rating scale in '{sentiment_column}'. Mapping: 1-2 = negative, 3 = neutral, 4-5 = positive")
+                return lambda x: 'negative' if pd.to_numeric(x) <= 2 else ('neutral' if pd.to_numeric(x) == 3 else 'positive')
+            elif min_val >= 0 and max_val <= 1:
+                st.write(f"Detected 0-1 score in '{sentiment_column}'. Mapping: <0.4 = negative, 0.4-0.6 = neutral, >0.6 = positive")
+                return lambda x: 'negative' if pd.to_numeric(x) < 0.4 else ('neutral' if pd.to_numeric(x) <= 0.6 else 'positive')
+            else:
+                st.write(f"Detected numeric values in '{sentiment_column}'. Mapping based on terciles.")
+                terciles = np.percentile(numeric_values, [33, 66])
+                return lambda x: 'negative' if pd.to_numeric(x) <= terciles[0] else ('neutral' if pd.to_numeric(x) <= terciles[1] else 'positive')
     except:
-        return 'en'
+        pass
+    
+    common_labels = {'positive', 'negative', 'neutral', 'pos', 'neg', 'neu', 'good', 'bad'}
+    if unique_values.issubset(common_labels):
+        st.write(f"Detected categorical labels in '{sentiment_column}': {unique_values}")
+        return lambda x: 'positive' if str(x).lower() in ['positive', 'pos', 'good'] else ('negative' if str(x).lower() in ['negative', 'neg', 'bad'] else 'neutral')
+    
+    if len(unique_values) <= 5:
+        st.write(f"Detected custom categorical labels in '{sentiment_column}': {unique_values}. Using as-is.")
+        return lambda x: str(x).lower()
+    
+    st.error(f"Unable to interpret '{sentiment_column}' with values: {unique_values}. Please ensure it contains ratings, scores, or clear sentiment labels.")
+    return None
 
-# Function to map continuous sentiment scores to categorical labels
-def map_to_categorical(value, pos_threshold=0.05, neg_threshold=-0.05):
-    try:
-        value = float(value)
-        if value >= pos_threshold:
-            return 'positive'
-        elif value <= neg_threshold:
-            return 'negative'
-        else:
-            return 'neutral'
-    except (ValueError, TypeError):
-        # If the value is already a string (e.g., "positive", "neg"), return it after standardizing
-        value = str(value).lower()
-        if 'pos' in value:
-            return 'positive'
-        elif 'neg' in value:
-            return 'negative'
-        elif 'neu' in value:
-            return 'neutral'
-        return value  # Return as-is if it doesn't match known categories
-
-# Function to detect columns
+# Function to detect columns automatically
 def detect_columns(df):
     text_candidates = [col for col in df.columns if any(keyword in col.lower() for keyword in ['text', 'review', 'comment', 'description'])]
-    sentiment_candidates = [col for col in df.columns if any(keyword in col.lower() for keyword in ['sentiment', 'label', 'target', 'class', 'score'])]
-    timestamp_candidates = [col for col in df.columns if any(keyword in col.lower() for keyword in ['time', 'date', 'timestamp'])]
-    return text_candidates, sentiment_candidates, timestamp_candidates
+    sentiment_candidates = [col for col in df.columns if any(keyword in col.lower() for keyword in ['sentiment', 'label', 'target', 'class', 'score', 'rating'])]
+    
+    text_column = text_candidates[0] if text_candidates else [col for col in df.columns if df[col].dtype == 'object'][0]
+    sentiment_column = sentiment_candidates[0] if sentiment_candidates else None
+    return text_column, sentiment_column
 
-# Function to train a sentiment model
+# Function to load file based on type
+def load_file(uploaded_file):
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            return pd.read_csv(uploaded_file)
+        elif uploaded_file.name.endswith('.xlsx'):
+            return pd.read_excel(uploaded_file)
+        elif uploaded_file.name.endswith('.txt'):
+            return pd.read_csv(uploaded_file, delimiter='\t', encoding='utf-8', on_bad_lines='skip')
+        elif uploaded_file.name.endswith('.json'):
+            data = json.load(uploaded_file)
+            return pd.DataFrame(data)
+        else:
+            st.error("Unsupported file format. Please upload CSV, Excel, TXT, or JSON.")
+            return None
+    except Exception as e:
+        st.error(f"Error loading file: {e}")
+        logging.error(f"Error loading file: {e}")
+        return None
+
+# Function to train a sentiment model with a default dataset if needed
 @st.cache_resource
-def train_sentiment_model():
-    # Load a small labeled dataset for training (replace with your own labeled data)
-    data = {
-        'text': [
-            "I love this product, it's amazing and works perfectly",
-            "This is the worst purchase I've ever made, terrible quality",
-            "The item is okay, nothing special but it works",
-            "Fantastic service, I'm so happy with my order",
-            "Horrible experience, I will never buy again",
-            "It's decent, does the job but could be better",
-        ],
-        'sentiment': ['positive', 'negative', 'neutral', 'positive', 'negative', 'neutral']
-    }
-    df_train = pd.DataFrame(data)
-    df_train['cleaned_text'] = df_train['text'].apply(lambda x: clean_text(x, remove_stopwords=True))
+def train_sentiment_model(df_train, text_column, sentiment_column, mapping_func=None):
+    # If no sentiment column or mapping function, use a default dataset
+    if sentiment_column is None or mapping_func is None:
+        st.write("No labeled data provided. Training on default Sentiment140 dataset (sample).")
+        try:
+            default_data = pd.read_csv('https://raw.githubusercontent.com/laxmimerit/twitter-data/master/twitt30k.csv', encoding='latin-1')
+            default_data.columns = ['text', 'sentiment']
+            default_data['sentiment'] = default_data['sentiment'].map({0: 'negative', 4: 'positive'}).fillna('neutral')
+            df_train = default_data.sample(1000, random_state=42)  # Sample for speed
+            text_column, sentiment_column = 'text', 'sentiment'
+            mapping_func = lambda x: x  # Identity function since labels are already mapped
+        except:
+            st.error("Failed to load default dataset. Please provide labeled data.")
+            return None, None, 0, 0, 0, 0
 
-    # Vectorize the text
+    df_train['cleaned_text'] = df_train[text_column].apply(lambda x: clean_text(x, remove_stopwords=True))
+    df_train['sentiment_mapped'] = df_train[sentiment_column].apply(mapping_func)
     vectorizer = TfidfVectorizer(max_features=5000)
     X = vectorizer.fit_transform(df_train['cleaned_text'])
-    y = df_train['sentiment']
+    y = df_train['sentiment_mapped']
 
-    # Train the model
     model = LogisticRegression(max_iter=1000)
-    model.fit(X, y)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    model.fit(X_train, y_train)
 
-    # Save the model and vectorizer
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    precision, recall, f1, _ = precision_recall_fscore_support(y_test, y_pred, average='weighted')
+
     joblib.dump(model, 'sentiment_model.pkl')
     joblib.dump(vectorizer, 'tfidf_vectorizer.pkl')
-
-    return model, vectorizer
+    return model, vectorizer, accuracy, precision, recall, f1
 
 # Function to load the model and vectorizer
 def load_model_and_vectorizer():
@@ -118,283 +144,222 @@ def load_model_and_vectorizer():
         model = joblib.load('sentiment_model.pkl')
         vectorizer = joblib.load('tfidf_vectorizer.pkl')
     except FileNotFoundError:
-        logging.info("Training new model as saved model not found.")
-        model, vectorizer = train_sentiment_model()
+        return None, None
     return model, vectorizer
 
-# Function to predict sentiment
-def predict_sentiment(texts, model, vectorizer, pos_threshold=0.5, neg_threshold=0.5):
+# Function to predict sentiment with a neutral zone
+def predict_sentiment(texts, model, vectorizer, threshold=0.6):
     cleaned_texts = [clean_text(text) for text in texts]
     X = vectorizer.transform(cleaned_texts)
     probs = model.predict_proba(X)
     predictions = []
     for prob in probs:
-        # Probabilities are ordered as [negative, neutral, positive]
-        neg_prob, neu_prob, pos_prob = prob
-        if pos_prob >= pos_threshold:
-            predictions.append('positive')
-        elif neg_prob >= neg_threshold:
-            predictions.append('negative')
+        max_prob = max(prob)
+        if max_prob < threshold and 'neutral' in model.classes_:
+            predictions.append('neutral')  # Neutral if no strong confidence
         else:
-            predictions.append('neutral')
+            predictions.append(model.classes_[np.argmax(prob)])
     return predictions, probs
 
 # Visualization functions
-def plot_sentiment_distribution(sentiment_counts):
+def plot_sentiment_distribution(df, sentiment_column, mapping_func, title="Sentiment Distribution"):
+    df['sentiment_mapped'] = df[sentiment_column].apply(mapping_func)
     fig, ax = plt.subplots(figsize=(8, 6))
-    ax.pie(sentiment_counts, labels=sentiment_counts.index, autopct='%1.1f%%',
-           colors=[SENTIMENT_COLORS.get(sentiment, '#d3d3d3') for sentiment in sentiment_counts.index],
-           startangle=90, wedgeprops={'edgecolor': 'white'})
-    ax.set_title("Sentiment Distribution", fontsize=14, pad=20)
+    sns.countplot(x=df['sentiment_mapped'], ax=ax, palette=SENTIMENT_COLORS, hue=df['sentiment_mapped'], legend=False)
+    ax.set_title(title, fontsize=14)
+    ax.set_xlabel("Sentiment", fontsize=12)
+    ax.set_ylabel("Count", fontsize=12)
     plt.tight_layout()
     st.pyplot(fig)
     plt.close()
 
-def plot_word_cloud(words, sentiment):
+def plot_word_cloud(df, text_column, sentiment_column, sentiment, mapping_func):
+    df['sentiment_mapped'] = df[sentiment_column].apply(mapping_func)
+    words = ' '.join(df[df['sentiment_mapped'] == sentiment][text_column].dropna())
     if words:
-        wordcloud = WordCloud(width=400, height=300, background_color='white',
+        wordcloud = WordCloud(width=800, height=400, background_color='white',
                               stopwords=stop_words).generate(words)
-        fig, ax = plt.subplots(figsize=(5, 4))
+        fig, ax = plt.subplots(figsize=(8, 4))
         ax.imshow(wordcloud, interpolation='bilinear')
-        ax.set_title(f'{sentiment.capitalize()} Words', fontsize=12)
+        ax.set_title(f'{sentiment.capitalize()} Words', fontsize=14)
         ax.axis('off')
         st.pyplot(fig)
         plt.close()
 
-def plot_sentiment_trend(df, timestamp_column):
-    try:
-        df['timestamp'] = pd.to_datetime(df[timestamp_column], errors='coerce')
-        df = df.dropna(subset=['timestamp'])
-        trend = df.groupby([df['timestamp'].dt.date, 'sentiment']).size().unstack(fill_value=0)
-        fig, ax = plt.subplots(figsize=(10, 6))
-        for sentiment in trend.columns:
-            ax.plot(trend.index, trend[sentiment], label=sentiment, color=SENTIMENT_COLORS.get(sentiment))
-        ax.set_title("Sentiment Trend Over Time", fontsize=14, pad=20)
-        ax.set_xlabel("Date", fontsize=12)
-        ax.set_ylabel("Number of Reviews", fontsize=12)
-        ax.legend()
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close()
-    except Exception as e:
-        st.warning(f"Could not process timestamp column: {e}")
+def plot_text_length_distribution(df, text_column):
+    df['text_length'] = df[text_column].astype(str).apply(len)
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.histplot(df['text_length'], bins=30, kde=True, ax=ax, color='#8da0cb')
+    ax.set_title("Text Length Distribution", fontsize=14)
+    ax.set_xlabel("Text Length (characters)", fontsize=12)
+    ax.set_ylabel("Frequency", fontsize=12)
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
 
 def plot_confusion_matrix(y_true, y_pred, classes):
     cm = confusion_matrix(y_true, y_pred)
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
-    ax.set_title("Confusion Matrix", fontsize=14, pad=20)
+    ax.set_title("Confusion Matrix", fontsize=14)
     ax.set_xlabel("Predicted", fontsize=12)
     ax.set_ylabel("Actual", fontsize=12)
     plt.tight_layout()
     st.pyplot(fig)
     plt.close()
 
-def plot_roc_curve(y_true, y_prob, classes):
-    if len(classes) == 2:
-        y_true_binary = np.where(y_true == classes[1], 1, 0)
-        fpr, tpr, _ = roc_curve(y_true_binary, y_prob[:, 1])
-        roc_auc = auc(fpr, tpr)
-        fig, ax = plt.subplots(figsize=(8, 6))
-        ax.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (AUC = {roc_auc:.2f})')
-        ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-        ax.set_xlim([0.0, 1.0])
-        ax.set_ylim([0.0, 1.05])
-        ax.set_xlabel('False Positive Rate', fontsize=12)
-        ax.set_ylabel('True Positive Rate', fontsize=12)
-        ax.set_title('Receiver Operating Characteristic (ROC) Curve', fontsize=14, pad=20)
-        ax.legend(loc="lower right")
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close()
-
-def get_top_features(model, vectorizer, n=10):
-    feature_names = vectorizer.get_feature_names_out()
-    coef = model.coef_
-    if len(model.classes_) == 2:  # Binary classification
-        top_positive = np.argsort(coef[0])[-n:]
-        top_negative = np.argsort(coef[0])[:n]
-        return [(feature_names[i], coef[0][i]) for i in top_positive], [(feature_names[i], coef[0][i]) for i in top_negative]
-    else:  # Multi-class
-        top_features = {}
-        for i, class_label in enumerate(model.classes_):
-            top_indices = np.argsort(coef[i])[-n:]
-            top_features[class_label] = [(feature_names[idx], coef[i][idx]) for idx in top_indices]
-        return top_features
+def display_sentiment_counts(df, sentiment_column, mapping_func, title="Sentiment Counts"):
+    df['sentiment_mapped'] = df[sentiment_column].apply(mapping_func)
+    counts = df['sentiment_mapped'].value_counts()
+    st.write(f"**{title}:**")
+    for sentiment, count in counts.items():
+        st.write(f"{sentiment.capitalize()}: {count}")
 
 def main():
-    st.title("Sentiment Analysis Dashboard")
+    st.title("Sentiment Analysis Dashboard with EDA")
     st.markdown("""
-    Upload your dataset (CSV or TXT) to analyze the sentiment of text data. The app trains a machine learning model to classify sentiments,
-    provides interactive visualizations, and allows you to download the processed dataset with sentiment labels.
+    Upload a CSV, Excel, TXT, or JSON file with text and optional sentiment data.
+    Explore your data, train a model, and predict sentiments with detailed metrics and visualizations.
     """)
 
-    # Load or train the model
-    model, vectorizer = load_model_and_vectorizer()
-
-    # File Upload Section
-    st.header("1. Upload Data 📂")
-    uploaded_file = st.file_uploader("Upload your dataset (CSV or TXT)", type=["csv", "txt"])
+    # Step 1: Upload & Preview Dataset
+    st.header("1. Upload & Preview Dataset 📂")
+    uploaded_file = st.file_uploader("Upload CSV, Excel, TXT, or JSON", type=["csv", "xlsx", "txt", "json"])
 
     if uploaded_file:
-        # Read the Uploaded File
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_csv(uploaded_file, delimiter='\t', encoding='utf-8')
-        except Exception as e:
-            st.error(f"Error loading file: {e}")
-            logging.error(f"Error loading file: {e}")
+        df = load_file(uploaded_file)
+        if df is None or df.empty:
+            st.error("Failed to load dataset or dataset is empty.")
             return
 
-        st.write("**Dataset Preview:**")
-        st.write(df.head())
+        st.write("### Data Preview:")
+        st.dataframe(df.head())
 
         # Auto-detect columns
-        text_cols, sentiment_cols, timestamp_cols = detect_columns(df)
-        default_text = text_cols[0] if text_cols else df.columns[0]
-        default_timestamp = timestamp_cols[0] if timestamp_cols else None
+        text_column, sentiment_column = detect_columns(df)
+        st.write(f"**Auto-Detected Columns:** Text: {text_column}, Sentiment: {sentiment_column}")
 
-        # Column selection
-        review_column = st.selectbox("Select text column:", df.columns, index=df.columns.get_loc(default_text))
-        sentiment_column = st.selectbox("Select sentiment column (optional, for evaluation):", [None] + list(df.columns),
-                                        index=df.columns.get_loc(sentiment_cols[0]) if sentiment_cols else 0)
-        timestamp_column = st.selectbox("Select timestamp column (optional):", [None] + list(df.columns),
-                                       index=df.columns.get_loc(default_timestamp) if default_timestamp else 0)
+        # Allow manual override
+        text_column = st.selectbox("Override Text Column (if needed):", df.columns, index=df.columns.get_loc(text_column))
+        sentiment_column = st.selectbox("Override Sentiment Column (optional, required for custom training):", [None] + list(df.columns),
+                                        index=df.columns.get_loc(sentiment_column) if sentiment_column else 0)
 
-        # Data Preprocessing
-        st.header("2. Data Preprocessing 🛠️")
-        remove_stopwords = st.checkbox("Remove Stopwords", value=True)
-        exclude_words = set(list(df.columns) + ['user', 'profile', 'id', 'name'])
-        df['cleaned_text'] = df[review_column].apply(lambda x: clean_text(x, remove_stopwords, exclude_words))
+        # Step 2: Exploratory Data Analysis (EDA)
+        st.header("2. Exploratory Data Analysis (EDA) 🕵️‍♂️")
+        st.write("### Dataset Summary:")
+        st.write(df.describe(include="all"))
 
-        # Show cleaned data preview with toggle
-        if st.checkbox("Show Cleaned Data Preview"):
-            st.write("**Cleaned Data Preview:**")
-            st.write(df[[review_column, 'cleaned_text']].head())
+        st.write("### Missing Values:")
+        st.write(df.isnull().sum())
 
-        # Detect language
-        sample_text = ' '.join(df['cleaned_text'].head(5))
-        language = detect_language(sample_text)
-        st.write(f"**Detected Language:** {language.upper()}")
-
-        # Perform Sentiment Analysis
-        st.header("3. Sentiment Analysis Results 📊")
-        # Custom thresholds for prediction
-        st.subheader("Adjust Sentiment Thresholds for Prediction")
-        pos_threshold = st.slider("Positive Threshold", 0.0, 1.0, 0.5)
-        neg_threshold = st.slider("Negative Threshold", 0.0, 1.0, 0.5)
-
-        predictions, probs = predict_sentiment(df['cleaned_text'], model, vectorizer, pos_threshold, neg_threshold)
-        df['sentiment'] = predictions
-        df['sentiment_probs'] = [dict(zip(model.classes_, prob)) for prob in probs]
-
-        # Sentiment Distribution
-        st.subheader("Sentiment Distribution")
-        sentiment_counts = df['sentiment'].value_counts(normalize=True) * 100
-        st.write(sentiment_counts)
-        plot_sentiment_distribution(sentiment_counts)
-
-        # Word Clouds for Positive and Negative Sentiments
-        st.subheader("Word Clouds")
-        col1, col2 = st.columns(2)
-        for sentiment, col in [('positive', col1), ('negative', col2)]:
-            with col:
-                words = ' '.join(df[df['sentiment'] == sentiment]['cleaned_text'])
-                plot_word_cloud(words, sentiment)
-
-        # Time Series Analysis
-        if timestamp_column and timestamp_column in df.columns:
-            st.subheader("Sentiment Trend Over Time")
-            plot_sentiment_trend(df, timestamp_column)
-
-        # Model Evaluation (if labeled data is provided)
-        if sentiment_column and sentiment_column in df.columns:
-            st.subheader("Model Evaluation")
-            y_pred = df['sentiment']
-            # Convert y_true to categorical labels if necessary
-            y_true = df[sentiment_column].apply(lambda x: map_to_categorical(x, pos_threshold=0.05, neg_threshold=-0.05))
-
-            # Validate that y_true and y_pred are compatible
-            unique_true = set(y_true.unique())
-            unique_pred = set(y_pred.unique())
-            expected_labels = {'positive', 'negative', 'neutral'}
-            if not (unique_true.issubset(expected_labels) and unique_pred.issubset(expected_labels)):
-                st.error("The sentiment column contains values that cannot be mapped to 'positive', 'negative', or 'neutral'. "
-                         "Please ensure the column contains either categorical labels (e.g., 'positive', 'neg', 'neutral') "
-                         "or continuous scores that can be thresholded.")
+        mapping_func = None
+        if sentiment_column:
+            mapping_func = detect_and_map_sentiment(df, sentiment_column)
+            if mapping_func is None:
                 return
 
-            # Compute metrics
-            accuracy = accuracy_score(y_true, y_pred)
-            precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='weighted')
+            unique_sentiments = df[sentiment_column].unique()
+            st.write(f"### Unique Sentiment Values: {list(unique_sentiments)}")
+            display_sentiment_counts(df, sentiment_column, mapping_func, "Sentiment Counts Before Prediction")
+            plot_sentiment_distribution(df, sentiment_column, mapping_func, "Sentiment Distribution Before Prediction")
 
-            # Display metrics with explanations
-            st.write("### Evaluation Metrics")
-            st.write("**Accuracy**: The proportion of correct predictions out of all predictions.")
-            st.write("Formula: `Accuracy = (Correct Predictions) / (Total Predictions)`")
-            st.write("Useful if classes are balanced (equal positive & negative examples).")
-            st.write(f"**Accuracy**: {accuracy:.2f}")
-
-            st.write("**Precision**: Measures how many positive predictions were actually correct.")
-            st.write("Formula: `Precision = TP / (TP + FP)`")
-            st.write("High precision means few false positives (good when false alarms are costly).")
-            st.write(f"**Precision (weighted)**: {precision:.2f}")
-
-            st.write("**Recall (Sensitivity)**: Measures how many actual positives were correctly predicted.")
-            st.write("Formula: `Recall = TP / (TP + FN)`")
-            st.write("High recall means low false negatives (important if missing positives is bad).")
-            st.write(f"**Recall (weighted)**: {recall:.2f}")
-
-            st.write("**F1-Score**: A balance between precision and recall.")
-            st.write("Formula: `F1-Score = 2 × (Precision × Recall) / (Precision + Recall)`")
-            st.write("Good for imbalanced datasets.")
-            st.write(f"**F1-Score (weighted)**: {f1:.2f}")
-
-            # Detailed Classification Report
-            st.write("**Classification Report**: Detailed metrics for each class.")
-            st.text(classification_report(y_true, y_pred))
-
-            # Confusion Matrix
-            st.write("**Confusion Matrix**: Shows how many predictions were correct/incorrect for each class.")
-            plot_confusion_matrix(y_true, y_pred, model.classes_)
-
-            # ROC Curve (for binary classification)
-            if len(model.classes_) == 2:
-                st.write("**ROC Curve**: Visualizes the trade-off between true positive rate and false positive rate.")
-                plot_roc_curve(y_true, probs, model.classes_)
-
-        # Feature Importance
-        st.subheader("Feature Importance (Top TF-IDF Features)")
-        if len(model.classes_) == 2:
-            top_positive, top_negative = get_top_features(model, vectorizer)
+            st.write("### Word Clouds:")
             col1, col2 = st.columns(2)
             with col1:
-                st.write("**Top Positive Features:**")
-                st.write(pd.DataFrame(top_positive, columns=['Feature', 'Coefficient']))
+                plot_word_cloud(df, text_column, sentiment_column, 'positive', mapping_func)
             with col2:
-                st.write("**Top Negative Features:**")
-                st.write(pd.DataFrame(top_negative, columns=['Feature', 'Coefficient']))
-        else:
-            top_features = get_top_features(model, vectorizer)
-            for sentiment, features in top_features.items():
-                st.write(f"**Top Features for {sentiment.capitalize()}:**")
-                st.write(pd.DataFrame(features, columns=['Feature', 'Coefficient']))
+                plot_word_cloud(df, text_column, sentiment_column, 'negative', mapping_func)
 
-        # Interactive Filter
-        st.subheader("Filter Reviews by Sentiment")
-        selected_sentiment = st.selectbox("Select sentiment to filter:", ['All'] + list(df['sentiment'].unique()))
-        filtered_df = df[df['sentiment'] == selected_sentiment] if selected_sentiment != 'All' else df
-        st.write(f"**Filtered Reviews ({selected_sentiment}):**")
-        st.write(filtered_df[[review_column, 'sentiment']].head())
+        st.write("### Text Length Distribution:")
+        plot_text_length_distribution(df, text_column)
 
-        # Downloadable Report
-        st.header("4. Download Processed Data 📥")
+        # Step 3: Data Cleaning & Preprocessing
+        st.header("3. Data Cleaning & Preprocessing 🛠️")
+        remove_stopwords = st.checkbox("Remove Stopwords", value=True)
+        df['cleaned_text'] = df[text_column].apply(lambda x: clean_text(x, remove_stopwords))
+
+        if st.checkbox("Show Cleaned Data Preview"):
+            st.write("**Cleaned Data Preview:**")
+            st.write(df[[text_column, 'cleaned_text']].head())
+
+        # Step 4: Train & Evaluate a Sentiment Model
+        st.header("4. Train & Evaluate Sentiment Model 📈")
+        model, vectorizer = load_model_and_vectorizer()
+        
+        if st.button("Train Model"):
+            if sentiment_column and mapping_func:
+                if df[sentiment_column].isnull().sum() > 0:
+                    st.warning("Sentiment column contains missing values. Dropping these rows for training.")
+                    df_train = df.dropna(subset=[sentiment_column])
+                else:
+                    df_train = df
+            else:
+                df_train = df  # Will trigger default dataset
+            
+            model, vectorizer, accuracy, precision, recall, f1 = train_sentiment_model(df_train, text_column, sentiment_column, mapping_func)
+            if model is None:
+                return
+            st.success(f"Model trained successfully!")
+
+            # Display model metrics
+            st.write("### Model Performance on Test Set:")
+            st.write(f"**Accuracy:** {accuracy:.2f}")
+            st.write(f"**Precision (weighted):** {precision:.2f}")
+            st.write(f"**Recall (weighted):** {recall:.2f}")
+            st.write(f"**F1-Score (weighted):** {f1:.2f}")
+            st.write(f"**Classes:** {list(model.classes_)}")
+
+            # Predict on full dataset
+            predictions, probs = predict_sentiment(df['cleaned_text'], model, vectorizer)
+            df['predicted_sentiment'] = predictions
+            st.write("### Predictions on Uploaded Data:")
+            st.write(df[[text_column, 'predicted_sentiment']].head())
+
+            # Sentiment counts after prediction
+            display_sentiment_counts(df, 'predicted_sentiment', lambda x: x, "Sentiment Counts After Prediction")
+            plot_sentiment_distribution(df, 'predicted_sentiment', lambda x: x, "Sentiment Distribution After Prediction")
+
+            # Full dataset metrics if labeled
+            if sentiment_column:
+                y_true = df['sentiment_mapped']
+                y_pred = df['predicted_sentiment']
+                full_accuracy = accuracy_score(y_true, y_pred)
+                full_precision, full_recall, full_f1, _ = precision_recall_fscore_support(y_true, y_pred, average='weighted')
+                st.write("### Model Performance on Full Dataset:")
+                st.write(f"**Accuracy:** {full_accuracy:.2f}")
+                st.write(f"**Precision (weighted):** {full_precision:.2f}")
+                st.write(f"**Recall (weighted):** {full_recall:.2f}")
+                st.write(f"**F1-Score (weighted):** {full_f1:.2f}")
+                st.text(classification_report(y_true, y_pred))
+                plot_confusion_matrix(y_true, y_pred, model.classes_)
+
+        # Load existing model if no training
+        elif model:
+            predictions, probs = predict_sentiment(df['cleaned_text'], model, vectorizer)
+            df['predicted_sentiment'] = predictions
+            st.write("### Predictions Using Pre-Trained Model:")
+            st.write(df[[text_column, 'predicted_sentiment']].head())
+            display_sentiment_counts(df, 'predicted_sentiment', lambda x: x, "Sentiment Counts After Prediction")
+            plot_sentiment_distribution(df, 'predicted_sentiment', lambda x: x, "Sentiment Distribution After Prediction")
+
+        # Step 5: Sentiment Prediction on New Text
+        st.header("5. Predict Sentiment on New Text 🌟")
+        user_input = st.text_area("Enter text to analyze sentiment:")
+        if st.button("Predict Sentiment") and user_input and model:
+            pred, prob = predict_sentiment([user_input], model, vectorizer)
+            sentiment = pred[0]
+            prob_dict = dict(zip(model.classes_, prob[0]))
+            st.write(f"**Predicted Sentiment:** {sentiment.capitalize()}")
+            st.write(f"**Probabilities:** {prob_dict}")
+            # Highlight if prediction is uncertain
+            max_prob = max(prob[0])
+            if max_prob < 0.6:
+                st.warning("Prediction confidence is low. Consider reviewing training data or text input.")
+
+        # Download Results
+        st.header("6. Download Processed Data 📥")
         output = io.BytesIO()
-        df_to_download = df[[review_column, 'cleaned_text', 'sentiment']]
-        if 'timestamp' in df.columns:
-            df_to_download['timestamp'] = df['timestamp']
+        df_to_download = df[[text_column, 'cleaned_text', 'predicted_sentiment']] if 'predicted_sentiment' in df.columns else df[[text_column, 'cleaned_text']]
         df_to_download.to_csv(output, index=False)
         output.seek(0)
         st.download_button(

@@ -1,10 +1,10 @@
 **Sentiment Analysis Dashboard**
 
-Overview
+**Overview**
 
 This repository contains a Streamlit-based sentiment analysis dashboard that allows users to analyze text data, detect sentiment labels, and visualize various insights. The application supports multiple file formats (CSV, Excel, TXT, JSON) and automatically detects text and sentiment columns in the uploaded dataset.
 
-Features
+**Features**
 
 Text Preprocessing: Cleans and tokenizes text, removing punctuation and stopwords.
 
@@ -14,7 +14,7 @@ Automatic Column Detection: Identifies relevant text and sentiment columns from 
 
 Sentiment Model Training: Trains a Logistic Regression model using TF-IDF vectorization.
 
-Visualization Tools:
+**Visualization Tools:**
 
 Sentiment distribution plots
 
@@ -30,8 +30,8 @@ Model Persistence: Saves trained models using joblib for future predictions.
 
 Pre-Trained Model Support: Users can load and apply pre-trained models for sentiment analysis.
 
-Installation
-
+**Installation
+**
 To run this application, ensure you have Python installed and set up a virtual environment.
 
 # Clone the repository

@@ -45,8 +45,7 @@ source venv/bin/activate  # On Windows use: venv\Scripts\activate
 # Install dependencies
 pip install -r requirements.txt
 
-**Running the Application
-**
+**Running the Application**
 To start the Streamlit dashboard, use the following command:
 
 streamlit run app.py
@@ -99,6 +98,5 @@ If you want to improve this project, feel free to fork the repository and submit
 
 This project is licensed under the MIT License.
 
-**Contact
-**
+**Contact**
 For any queries, reach out via GitHub Issues or email.

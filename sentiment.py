@@ -1,8 +1,3 @@
-# sentiment_analysis_app.py
-# A Streamlit-based sentiment analysis dashboard for text data (e.g., stock news, tweets)
-# Author: [Your Name]
-# Date: April 2025
-
 import streamlit as st
 import pandas as pd
 import numpy as np

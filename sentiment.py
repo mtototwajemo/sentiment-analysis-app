@@ -244,7 +244,7 @@ def display_sentiment_counts(df, sentiment_column, mapping_func, title="Sentimen
 
 def main():
     """Main function to run the Streamlit app."""
-    st.title("Super Sentiment Analysis Dashboard")
+    st.title("SENTIMENT ANALYSIS DASHBOARD ")
     st.markdown("""
     Analyze sentiments in stock news, tweets, or financial reports. Upload your data, explore it, train a model,
     and predict sentiments with detailed metrics and visualizations. No external LLM APIs—just pure ML power!
